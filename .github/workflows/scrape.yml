@@ -9,6 +9,10 @@ on:
         description: 'Force re-scrape (ignore the 12h skip)'
         type: boolean
         default: false
+      scrape_limit:
+        description: "Sample only N URLs (0 = full scrape; the cron schedule always runs at 0)"
+        type: string
+        default: '0'
 
 concurrency:
   group: scrape
@@ -41,7 +45,8 @@ jobs:
           SITE_ORIGIN: https://zahcomputers.pk/
           CONCURRENCY: '2'
           REQUEST_DELAY_MS: '1500'
-          SCRAPE_LIMIT: '0'   # always full scrape on CI; never inherit a smoke-test value
+          # cron triggers carry no inputs -> the `|| '0'` ensures scheduled runs scrape everything.
+          SCRAPE_LIMIT: ${{ inputs.scrape_limit || '0' }}
           RESCRAPE_AFTER_HOURS: '12'
           FORCE_RESCRAPE: ${{ inputs.force }}
         run: python -m src.scraper
