@@ -57,18 +57,38 @@ The first run takes a couple of minutes longer than subsequent ones because it
 has to call FlareSolverr once. Re-runs within ~1 hour reuse the cached
 `.cf-cookies.json`.
 
-## Schedule on GitHub Actions
+## Schedule (lives on the VPS, not in CI)
 
-Add these to repo **Settings → Secrets → Actions**, then
-`.github/workflows/scrape.yml` runs daily at 02:00 UTC (07:00 PKT) and can be
-triggered manually:
+Cloudflare's `cf_clearance` cookie is bound to the **IP** that solved the
+challenge. Our FlareSolverr instance and the production scraper both run on
+the same VPS, so cookies match natively. A GitHub Actions runner has a
+different IP, so cookies handed to it are rejected (403) on the very first
+fetch — see the comment at the top of `.github/workflows/scrape.yml`.
 
-- `NOCODB_API_TOKEN`
-- `NOCODB_BASE_ID`
-- `FLARESOLVERR_URL`
+Scheduling is therefore handled by **systemd** on the VPS:
 
-The CI runner gets a fresh public IP each run, so it always re-solves Cloudflare
-(no cached cookies to invalidate). One solve per daily run is fine.
+- `/etc/systemd/system/zah-scraper.service` — runs `./run_scrape.sh`.
+- `/etc/systemd/system/zah-scraper.timer` — daily at 02:00 UTC (07:00 PKT).
+
+```bash
+# Install (one time)
+sudo cp run_scrape.sh /root/megacomputer-automation-scrapping/zahcomputers-scrapping/
+sudo systemctl daemon-reload
+sudo systemctl enable --now zah-scraper.timer
+
+# Check next fire / last run
+systemctl list-timers zah-scraper.timer
+journalctl -u zah-scraper.service -n 50
+
+# One-off run with a limit (smoke test)
+sudo systemd-run --unit=zah-scraper-test --setenv=SCRAPE_LIMIT=50 \
+  /root/megacomputer-automation-scrapping/zahcomputers-scrapping/run_scrape.sh
+journalctl -u zah-scraper-test -f
+```
+
+The `.github/workflows/scrape.yml` workflow is kept for reference and for
+manual smoke runs **from a host whose IP matches the FlareSolverr instance** —
+don't trigger it from a GitHub-hosted runner.
 
 ## Tables (created automatically)
 

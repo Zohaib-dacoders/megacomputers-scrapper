@@ -1,8 +1,17 @@
 name: Scrape Zahcomputers.pk
 
+# NOTE: the daily cron schedule runs on the VPS, not here.
+#
+# Cloudflare's cf_clearance cookie is bound to the IP that solved the challenge,
+# and our FlareSolverr instance shares the VPS's IP. A GitHub Actions runner has
+# a different IP, so cookies returned to it are 403'd by Cloudflare. Daily runs
+# are driven by zah-scraper.timer (systemd) on the VPS instead.
+#
+# This workflow is kept for: (1) reference, (2) manual smoke tests from a host
+# whose IP matches the FlareSolverr instance — i.e. don't trigger it from
+# GitHub-hosted runners.
+
 on:
-  schedule:
-    - cron: '0 2 * * *'   # 02:00 UTC daily = 07:00 PKT
   workflow_dispatch:
     inputs:
       force:
