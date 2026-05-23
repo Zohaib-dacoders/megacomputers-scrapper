@@ -5,5 +5,5 @@ __pycache__/
 *.log
 .pytest_cache/
 .env
-.cf-cookies.json
+.cf-cookies*.json
 tests/samples/
