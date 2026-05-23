@@ -22,14 +22,14 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
 import httpx
 from dotenv import load_dotenv
 
-from .flaresolverr import CloudflareSession
+from .flaresolverr import CloudflareSession, redact_proxy
 from .nocodb import NocoDB
 from .parse import (
     is_likely_product_url,
@@ -46,13 +46,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("zah-scraper")
 
 
+def _parse_proxy_pool(value: str) -> list[str]:
+    """Comma- or whitespace-separated; empty/blank entries dropped."""
+    if not value:
+        return []
+    return [u.strip() for u in value.replace("\n", ",").split(",") if u.strip()]
+
+
 @dataclass
 class Config:
     sitemap_url: str = os.getenv("SITEMAP_URL", "https://zahcomputers.pk/sitemap_index.xml")
     site_origin: str = os.getenv("SITE_ORIGIN", "https://zahcomputers.pk/")
     flaresolverr_url: str = os.getenv("FLARESOLVERR_URL", "")
-    cf_cookie_cache_path: str = os.getenv("CF_COOKIE_CACHE_PATH", ".cf-cookies.json")
     cf_session_ttl_seconds: int = int(os.getenv("CF_SESSION_TTL_SECONDS", "3600"))
+    # Comma-separated pool. Today's proxy = pool[date.today().toordinal() % len(pool)].
+    # On startup-solve failure we walk forward. Empty pool = fetch directly from this host.
+    outbound_proxy_urls: list[str] = field(
+        default_factory=lambda: _parse_proxy_pool(os.getenv("OUTBOUND_PROXY_URLS", ""))
+    )
     concurrency: int = int(os.getenv("CONCURRENCY", "2"))
     request_delay_ms: int = int(os.getenv("REQUEST_DELAY_MS", "1500"))
     timeout: float = float(os.getenv("REQUEST_TIMEOUT", "30"))
@@ -262,6 +273,48 @@ async def _walk_sitemaps(cfg: Config, client: httpx.AsyncClient, throttle: Throt
     return all_urls
 
 
+async def _prime_cf_session(cfg: Config) -> tuple[CloudflareSession, str]:
+    """Pick today's proxy from the pool and prime a CloudflareSession.
+
+    Rotation: `pool[date.today().toordinal() % len(pool)]`. If that proxy fails
+    to solve the challenge, walk forward through the list until one succeeds.
+    Returns (session, active_proxy_url); active_proxy_url is "" when the pool
+    is empty (direct mode from this host).
+    """
+    pool = cfg.outbound_proxy_urls
+    if not pool:
+        log.info("no outbound proxy configured — fetching from this host's IP")
+        session = CloudflareSession(
+            flaresolverr_url=cfg.flaresolverr_url,
+            session_ttl_seconds=cfg.cf_session_ttl_seconds,
+        )
+        await asyncio.to_thread(session.get, cfg.site_origin)
+        return session, ""
+
+    start_idx = date.today().toordinal() % len(pool)
+    log.info("proxy pool: %d entries; starting at index %d (daily rotation)", len(pool), start_idx)
+
+    last_error: Exception | None = None
+    for offset in range(len(pool)):
+        proxy = pool[(start_idx + offset) % len(pool)]
+        log.info("trying proxy %s", redact_proxy(proxy))
+        session = CloudflareSession(
+            flaresolverr_url=cfg.flaresolverr_url,
+            proxy_url=proxy,
+            session_ttl_seconds=cfg.cf_session_ttl_seconds,
+        )
+        try:
+            await asyncio.to_thread(session.get, cfg.site_origin)
+        except Exception as e:
+            log.warning("proxy %s failed to solve: %s", redact_proxy(proxy), e)
+            last_error = e
+            continue
+        log.info("active proxy: %s", redact_proxy(proxy))
+        return session, proxy
+
+    raise RuntimeError(f"all {len(pool)} proxies failed to solve Cloudflare; last error: {last_error}")
+
+
 async def _scrape_all(
     cfg: Config,
     should_scrape: Callable[[str], bool],
@@ -274,13 +327,8 @@ async def _scrape_all(
     if not cfg.flaresolverr_url:
         raise RuntimeError("FLARESOLVERR_URL must be set — zahcomputers is behind Cloudflare")
 
-    session = CloudflareSession(
-        flaresolverr_url=cfg.flaresolverr_url,
-        cache_path=cfg.cf_cookie_cache_path,
-        session_ttl_seconds=cfg.cf_session_ttl_seconds,
-    )
-    log.info("priming Cloudflare cookies from %s", cfg.site_origin)
-    cookies, user_agent = await asyncio.to_thread(session.get, cfg.site_origin, False)
+    session, active_proxy = await _prime_cf_session(cfg)
+    cookies, user_agent = session.get(cfg.site_origin)   # already warm in cache from _prime
 
     headers = {
         "User-Agent": user_agent,
@@ -297,6 +345,7 @@ async def _scrape_all(
         timeout=cfg.timeout,
         limits=limits,
         http2=True,
+        proxy=active_proxy or None,
     ) as client:
         refresher = CfRefresher(session, client, cfg.site_origin)
 
