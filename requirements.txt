@@ -1,0 +1,4 @@
+httpx[http2]==0.27.2
+python-dotenv==1.0.1
+tenacity==9.0.0
+selectolax==0.3.27

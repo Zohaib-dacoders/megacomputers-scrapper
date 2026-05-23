@@ -1,0 +1,47 @@
+name: Scrape Zahcomputers.pk
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 02:00 UTC daily = 07:00 PKT
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force re-scrape (ignore the 12h skip)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          NOCODB_BASE_URL: https://anchor.dacoders.com
+          NOCODB_API_TOKEN: ${{ secrets.NOCODB_API_TOKEN }}
+          # Pin the base id so a stale secret can't silently redirect the scrape
+          # into the wrong base. The TODO placeholder is replaced by the
+          # zahcomputers base id once it's been created (see README).
+          NOCODB_BASE_ID: ${{ secrets.NOCODB_BASE_ID }}
+          FLARESOLVERR_URL: ${{ secrets.FLARESOLVERR_URL }}
+          SITEMAP_URL: https://zahcomputers.pk/sitemap_index.xml
+          SITE_ORIGIN: https://zahcomputers.pk/
+          CONCURRENCY: '2'
+          REQUEST_DELAY_MS: '1500'
+          SCRAPE_LIMIT: '0'   # always full scrape on CI; never inherit a smoke-test value
+          RESCRAPE_AFTER_HOURS: '12'
+          FORCE_RESCRAPE: ${{ inputs.force }}
+        run: python -m src.scraper
