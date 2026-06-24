@@ -7,3 +7,8 @@ __pycache__/
 .env
 .cf-cookies*.json
 tests/samples/
+
+# venv backups + local secrets backups (never commit)
+**/.venv*/
+.venv_old_almabak/
+*.bak*

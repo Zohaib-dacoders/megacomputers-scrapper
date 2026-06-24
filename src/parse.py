@@ -354,10 +354,14 @@ def _cell_key(cell: Node) -> str:
     key cell is `<td>Name<p></p><p>Description</p></td>` — we want just "Name".
     Take the cell's HTML, split on the first <p> or <br>, strip tags."""
     raw = cell.html or ""
-    raw = re.sub(r"^<td[^>]*>", "", raw)
-    raw = re.sub(r"</td>\s*$", "", raw)
+    raw = re.sub(r"^<(?:td|th)[^>]*>", "", raw)
+    raw = re.sub(r"</(?:td|th)>\s*$", "", raw)
     head = re.split(r"<\s*(?:p|br)\b", raw, maxsplit=1)[0]
     text = re.sub(r"<[^>]+>", " ", head)
+    # th/td keys carry literal entities (&nbsp;) and NBSP before the colon —
+    # decode and normalise so keys are clean ("CPU Socket Type", not
+    # "CPU Socket Type&nbsp;").
+    text = html.unescape(text).replace("\xa0", " ")
     return " ".join(text.split()).strip()
 
 
@@ -375,25 +379,81 @@ def _is_header_row(key: str, value: str) -> bool:
     return key.lower() in SPEC_TABLE_HEADER_KEYS and value.lower() in SPEC_TABLE_HEADER_VALUES
 
 
+def _row_key_value(row: Node) -> tuple[Node, Node] | None:
+    """Pick the (key_cell, value_cell) from a spec row, across cell shapes:
+      - two <td>          (KOORUI/Lenovo/Dell): key=td[0], value=td[1]
+      - one <th> + one <td> (ASUS motherboard/PSU and most WooCommerce/WoodMart
+        spec tables): key=th, value=td
+      - two <th>          (some tables header both columns): key=th[0], value=th[1]
+    Returns None for rows that aren't a 2-cell key/value pair (section markers,
+    colspan banners, etc.)."""
+    th = row.css("th")
+    td = row.css("td")
+    if not th and len(td) == 2:
+        return td[0], td[1]
+    if len(th) == 1 and len(td) == 1:
+        return th[0], td[0]
+    if len(th) == 2 and not td:
+        return th[0], th[1]
+    return None
+
+
+def _spec_table_roots(tree: HTMLParser) -> list[Node]:
+    """Container(s) to mine spec tables from. Normally `#tab-description`, but
+    some products render their spec tables inside Elementor/WooCommerce tab
+    panels (`.elementor-tab-content`, `.wc-tab`) with no `#tab-description` — or
+    a `#tab-description` that's present but empty of tables. Fall back to those
+    panels so those products (e.g. ASUS routers) aren't left spec-less.
+
+    Prefer `#tab-description` when it actually carries tables, to avoid pulling
+    in unrelated tab content on the common path."""
+    panel = tree.css_first("#tab-description")
+    if panel and panel.css("table"):
+        return [panel]
+    # Fallback: spec tables can live in the WoodMart single-product content
+    # widget (.wd-single-content) or Elementor/WooCommerce tab panels rather
+    # than #tab-description. Gather from all candidates; _mine_description_tables
+    # de-dupes tables by identity and the 2-cell key/value filter keeps out
+    # non-spec (layout/related) tables.
+    roots: list[Node] = []
+    for sel in (".wd-single-content", ".elementor-widget-wd_single_product_content",
+                ".elementor-tab-content", ".wc-tab", ".woocommerce-Tabs-panel"):
+        roots.extend(tree.css(sel))
+    if roots:
+        return roots
+    return [panel] if panel else []
+
+
 def _mine_description_tables(tree: HTMLParser) -> dict[str, str]:
-    """Mine every <table> inside #tab-description for 2-cell rows. Handles
-    all three observed shapes (KOORUI plain, Lenovo Notion-style with section
-    rows, Dell .model-information-table with intervening <header>s).
+    """Mine every spec <table> for 2-cell key/value rows. Handles the observed
+    shapes: KOORUI plain 2-<td>, Lenovo Notion-style with section rows, Dell
+    .model-information-table with intervening <header>s, and the common
+    WooCommerce/WoodMart `<th>key</th><td>value</td>` table (ASUS motherboards,
+    PSUs, GPUs, RAM — previously dropped, yielding 0 specs). Tables are sourced
+    from `#tab-description` or, as a fallback, Elementor/WooCommerce tab panels
+    (see `_spec_table_roots`).
 
     Strategy B of the merge. Returns a flat key->value dict; if a key recurs
     across tables (Dell has "Width" under both Display and Dimensions) the
     last write wins."""
     out: dict[str, str] = {}
-    panel = tree.css_first("#tab-description")
-    if not panel:
-        return out
-    for table in panel.css("table"):
-        for row in table.css("tr"):
-            cells = row.css("td")
-            if len(cells) != 2:
+    seen_tables: set[int] = set()
+    tables: list[Node] = []
+    for root in _spec_table_roots(tree):
+        for table in root.css("table"):
+            # nested roots (panel inside a tab panel) can surface the same table
+            # twice — de-dupe by identity so we don't double-process.
+            if id(table) in seen_tables:
                 continue
-            key = _norm_key(_cell_key(cells[0]))
-            value = _cell_value(cells[1])
+            seen_tables.add(id(table))
+            tables.append(table)
+    for table in tables:
+        for row in table.css("tr"):
+            kv = _row_key_value(row)
+            if kv is None:
+                continue
+            key = _norm_key(_cell_key(kv[0]))
+            value = _cell_value(kv[1])
             if not key:
                 continue
             if not value:
