@@ -17,6 +17,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Proxy pool mounted from a host file (kept OFF this public repo). One
+    # `http://user:pass@ip:port` per line. The scraper reads /app/proxies.txt.
+    volumes:
+      - /root/proxies.txt:/app/proxies.txt:ro
     networks:
       - coolify
     # scrape now, then nightly. Logs to stdout (Coolify captures them).
