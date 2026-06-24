@@ -63,6 +63,27 @@ def _parse_proxy_pool(value: str) -> list[str]:
     return [u.strip() for u in parts if u.strip()]
 
 
+def _load_proxy_pool() -> list[str]:
+    """Proxies from a mounted FILE first, then the env var.
+
+    A long proxy list (many `http://user:pass@ip:port`, ~500+ chars) doesn't
+    survive some env stores (Coolify truncates it). A file has no such limit, so
+    we prefer one: `OUTBOUND_PROXY_FILE` path, else `proxies.txt` in the workdir.
+    One proxy per line (or comma-separated). Falls back to OUTBOUND_PROXY_URLS."""
+    path = os.getenv("OUTBOUND_PROXY_FILE", "").strip()
+    if not path and os.path.exists("proxies.txt"):
+        path = "proxies.txt"
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                pool = _parse_proxy_pool(f.read())
+            if pool:
+                return pool
+        except OSError:
+            pass
+    return _parse_proxy_pool(os.getenv("OUTBOUND_PROXY_URLS", ""))
+
+
 @dataclass
 class Config:
     sitemap_url: str = os.getenv("SITEMAP_URL", "https://zahcomputers.pk/sitemap_index.xml")
@@ -71,9 +92,7 @@ class Config:
     cf_session_ttl_seconds: int = int(os.getenv("CF_SESSION_TTL_SECONDS", "3600"))
     # Comma-separated pool. Today's proxy = pool[date.today().toordinal() % len(pool)].
     # On startup-solve failure we walk forward. Empty pool = fetch directly from this host.
-    outbound_proxy_urls: list[str] = field(
-        default_factory=lambda: _parse_proxy_pool(os.getenv("OUTBOUND_PROXY_URLS", ""))
-    )
+    outbound_proxy_urls: list[str] = field(default_factory=_load_proxy_pool)
     concurrency: int = int(os.getenv("CONCURRENCY", "2"))
     request_delay_ms: int = int(os.getenv("REQUEST_DELAY_MS", "1500"))
     timeout: float = float(os.getenv("REQUEST_TIMEOUT", "30"))
