@@ -47,10 +47,20 @@ log = logging.getLogger("zah-scraper")
 
 
 def _parse_proxy_pool(value: str) -> list[str]:
-    """Comma- or whitespace-separated; empty/blank entries dropped."""
+    """Comma- or newline-separated proxy URLs; empty/blank entries dropped.
+
+    Proxy URLs never contain whitespace, so when the value is comma-separated we
+    strip ALL whitespace first — robust to a UI (e.g. Coolify's env textarea)
+    wrapping a long single line and injecting newlines *inside* a proxy string.
+    Only when there are no commas do we treat newlines as separators."""
     if not value:
         return []
-    return [u.strip() for u in value.replace("\n", ",").split(",") if u.strip()]
+    if "," in value:
+        value = "".join(value.split())          # drop every space/newline/tab
+        parts = value.split(",")
+    else:
+        parts = value.splitlines()
+    return [u.strip() for u in parts if u.strip()]
 
 
 @dataclass
